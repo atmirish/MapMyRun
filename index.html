@@ -198,7 +198,39 @@ async function route(pts){
   if(!r.ok) throw new Error("router "+r.status);
   const j = await r.json();
   if(j.code!=="Ok" || !j.routes?.length) throw new Error("no route");
-  return {distance:j.routes[0].distance, coords:j.routes[0].geometry.coordinates.map(([x,y])=>({lat:y,lng:x})), pts};
+  const raw = j.routes[0].geometry.coordinates.map(([x,y])=>({lat:y,lng:x}));
+  const clean = state.mode==="loop" ? removeBacktracks(raw, j.routes[0].distance) : raw;
+  let d = 0; for(let i=1;i<clean.length;i++) d += hav(clean[i-1],clean[i]);
+  return {distance:d, coords:clean, pts};
+}
+
+// Cut out dead-end spurs and small side loops: whenever the path comes back
+// within a few metres of a point it passed a short distance earlier, drop
+// everything in between. The main loop's return to the start is never cut.
+function removeBacktracks(coords, total){
+  const NEAR = 15, maxCut = Math.min(1500, total*0.3), MIN = 25;
+  const out = [], cum = [];
+  for(const p of coords){
+    let cut = -1;
+    const here = out.length ? cum[cum.length-1] + hav(out[out.length-1], p) : 0;
+    for(let j=out.length-2; j>=0; j--){
+      const back = here - cum[j];
+      if(back > maxCut) break;
+      if(back > MIN && hav(out[j], p) < NEAR){ cut = j; }
+    }
+    if(cut >= 0){ out.length = cut+1; cum.length = cut+1; continue; }
+    out.push(p); cum.push(here);
+  }
+  return out;
+}
+
+// Points spread along the cleaned route, so Google Maps follows the same path.
+function pointsAlong(coords, n){
+  let tot=0; const cum=[0];
+  for(let i=1;i<coords.length;i++){ tot+=hav(coords[i-1],coords[i]); cum.push(tot); }
+  const res=[]; let i=0;
+  for(let k=1;k<=n;k++){ const t=tot*k/(n+1); while(cum[i]<t) i++; res.push(coords[i]); }
+  return res;
 }
 
 async function plan(){
@@ -260,7 +292,7 @@ function draw(r, target){
 
 function gmapsLink(r){
   const f = p=>p.lat.toFixed(6)+","+p.lng.toFixed(6);
-  const mid = r.pts.slice(1,-1).map(f).join("|");
+  const mid = (state.mode==="out" ? r.pts.slice(1,-1) : pointsAlong(r.coords,6)).map(f).join("|");
   return `https://www.google.com/maps/dir/?api=1&origin=${f(r.pts[0])}&destination=${f(r.pts[0])}&waypoints=${encodeURIComponent(mid)}&travelmode=walking`;
 }
 
