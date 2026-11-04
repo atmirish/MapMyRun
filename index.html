@@ -201,14 +201,34 @@ async function route(pts){
   const raw = j.routes[0].geometry.coordinates.map(([x,y])=>({lat:y,lng:x}));
   const clean = state.mode==="loop" ? removeBacktracks(raw, j.routes[0].distance) : raw;
   let d = 0; for(let i=1;i<clean.length;i++) d += hav(clean[i-1],clean[i]);
-  return {distance:d, coords:clean, pts};
+  return {distance:d, coords:clean, pts, overlap: overlapFrac(clean, d)};
+}
+
+// Share of the route that runs over ground already covered earlier
+// (out-and-back stretches, parallel side loops). 0 = perfectly clean loop.
+function overlapFrac(coords, total){
+  if(total < 1) return 1;
+  const CELL = 25, STEP = 10, seen = new Map();
+  const lat0 = coords[0].lat, mx = 111320*Math.cos(rad(lat0)), my = 110540;
+  let n = 0, over = 0;
+  for(let i=1;i<coords.length;i++){
+    const a = coords[i-1], b = coords[i], d = hav(a,b), k = Math.max(1, Math.round(d/STEP));
+    for(let s=0;s<k;s++){
+      const t = s/k, x = (a.lng+(b.lng-a.lng)*t)*mx, y = (a.lat+(b.lat-a.lat)*t)*my;
+      const key = Math.floor(x/CELL)+","+Math.floor(y/CELL);
+      const last = seen.get(key);
+      if(last !== undefined && n-last > 8) over += d/k;
+      seen.set(key, n); n++;
+    }
+  }
+  return over/total;
 }
 
 // Cut out dead-end spurs and small side loops: whenever the path comes back
 // within a few metres of a point it passed a short distance earlier, drop
 // everything in between. The main loop's return to the start is never cut.
 function removeBacktracks(coords, total){
-  const NEAR = 15, maxCut = Math.min(1500, total*0.3), MIN = 25;
+  const NEAR = 20, maxCut = Math.min(1500, total*0.3), MIN = 25;
   const out = [], cum = [];
   for(const p of coords){
     let cut = -1;
@@ -240,14 +260,33 @@ async function plan(){
   // Roads wiggle: start smaller than the ideal circle, then rescale toward the target.
   let size = state.mode==="loop" ? target/(2*Math.PI*1.25) : target/(2*1.25);
   let best = null;
-  try{
-    for(let i=0;i<5;i++){
-      const r = await route(waypoints(state.start,size,state.bearing,state.mode));
-      if(!best || Math.abs(r.distance-target) < Math.abs(best.distance-target)) best = r;
-      const err = (r.distance-target)/target;
-      if(Math.abs(err) < 0.04) break;
+  const loop = state.mode==="loop";
+  // Lower is better: distance error plus a heavy penalty for retracing or side loops.
+  const score = r => Math.abs(r.distance-target)/target + (loop ? 2*r.overlap : 0);
+  const keep = r => { if(!best || score(r) < score(best)) best = r; };
+  const tune = async (brg, tries) => {
+    for(let i=0;i<tries;i++){
+      const r = await route(waypoints(state.start,size,brg,state.mode)); r.brg = brg; keep(r);
+      if(Math.abs(r.distance-target)/target < 0.04) return r;
       size *= Math.min(1.8, Math.max(0.5, target/r.distance));
-      say(`Fine-tuning the distance… (${i+2}/5)`);
+    }
+  };
+  try{
+    say("Finding the right size…");
+    await tune(state.bearing, 3);
+    if(loop){
+      // Try the loop in other directions and keep the cleanest one.
+      for(let k=1;k<6;k++){
+        say(`Looking for the cleanest loop… (${k}/5)`);
+        const brg = state.bearing + k*Math.PI/3;
+        const r = await route(waypoints(state.start,size,brg,state.mode)); r.brg = brg; keep(r);
+      }
+      if(Math.abs(best.distance-target)/target > 0.05){
+        say("Fine-tuning the distance…");
+        size *= Math.min(1.8, Math.max(0.5, target/best.distance));
+        await tune(best.brg, 2);
+      }
+      state.bearing = best.brg;
     }
     state.route = best; draw(best, target);
   }catch(e){
