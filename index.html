@@ -35,6 +35,14 @@ body{background:var(--bg);color:var(--fg);font:15px/1.4 var(--body);overflow:hid
 .round{width:46px;height:46px;flex:none;border:0;border-radius:999px;background:var(--sheet);color:var(--fg);
   box-shadow:0 4px 16px rgba(0,0,0,.15);display:grid;place-items:center;cursor:pointer}
 .round svg{width:22px;height:22px}
+.round[aria-pressed="true"]{background:var(--accent);color:var(--accent-ink)}
+.zonebar{position:fixed;z-index:600;top:calc(env(safe-area-inset-top,0px) + 66px);
+  left:max(12px,env(safe-area-inset-left,0px));right:max(12px,env(safe-area-inset-right,0px));max-width:560px;margin:0 auto;
+  background:var(--sheet);border-radius:14px;box-shadow:0 4px 16px rgba(0,0,0,.15);padding:8px 8px 8px 14px;
+  display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:14px}
+.zonebar span{flex:1;min-width:140px}
+.zonebar button{border:1px solid var(--line);background:transparent;color:var(--fg);border-radius:10px;padding:6px 10px;font:600 13px var(--body);cursor:pointer}
+.zonebar button.primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
 
 .sheet{position:fixed;z-index:500;left:0;right:0;bottom:0;background:var(--sheet);box-shadow:var(--shadow);
   border-radius:18px 18px 0 0;padding:6px max(18px,env(safe-area-inset-right,0px)) calc(12px + env(safe-area-inset-bottom,0px)) max(18px,env(safe-area-inset-left,0px));
@@ -82,9 +90,18 @@ button:focus-visible,a:focus-visible,input:focus-visible{outline:2px solid var(-
   <form class="search" id="searchForm">
     <input id="q" type="search" placeholder="Start somewhere else…" aria-label="Search for a start point" autocomplete="off">
   </form>
+  <button class="round" id="zoneBtn" aria-pressed="false" aria-label="Set a zone to stay inside" title="Stay inside a zone">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M4 7l6-3 8 3 2 9-7 4-8-3z" stroke-dasharray="3 2.5"/><circle cx="12" cy="12" r="1.6" fill="currentColor"/></svg>
+  </button>
   <button class="round" id="locate" aria-label="Use my location" title="Use my location">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg>
   </button>
+</div>
+<div class="zonebar" id="zoneBar" hidden>
+  <span id="zoneHint">Tap the map to outline your zone.</span>
+  <button id="zoneUndo">Undo</button>
+  <button id="zoneClear">Remove zone</button>
+  <button id="zoneDone" class="primary">Done</button>
 </div>
 
 <section class="sheet" id="sheet">
@@ -135,7 +152,8 @@ const store = {get(k,d){try{const v=localStorage.getItem("loop-run:"+k);return v
 
 const state = {
   dist: store.get("dist",5), unit: store.get("unit","km"), mode: store.get("mode","loop"),
-  pace: store.get("pace","6:00"), start: null, bearing: Math.random()*2*Math.PI, route: null
+  pace: store.get("pace","6:00"), start: null, bearing: Math.random()*2*Math.PI, route: null,
+  zone: store.get("zone", null)   // [[lat,lng],...] polygon the route must stay inside
 };
 
 // ---------- map ----------
@@ -157,7 +175,65 @@ function setStart(lat,lng,label){
   map.setView([lat,lng], Math.max(map.getZoom(),14));
   say(label || "Start set. Pick a distance and tap Map my run.");
 }
-map.on("click", e => setStart(e.latlng.lat, e.latlng.lng, "Start moved here."));
+map.on("click", e => {
+  if(zoneDraft){ zoneDraft.push([e.latlng.lat, e.latlng.lng]); drawZone(); return; }
+  setStart(e.latlng.lat, e.latlng.lng, "Start moved here.");
+});
+
+// ---------- zone ----------
+let zoneDraft = null, zoneLayer = null;
+function drawZone(){
+  if(zoneLayer){ map.removeLayer(zoneLayer); zoneLayer=null; }
+  const accent = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim();
+  const pts = zoneDraft || state.zone;
+  if(pts && pts.length){
+    zoneLayer = L.layerGroup().addTo(map);
+    if(pts.length>=3) L.polygon(pts,{color:accent,weight:2,dashArray:"6 6",fillColor:accent,fillOpacity:.08,interactive:false}).addTo(zoneLayer);
+    else L.polyline(pts,{color:accent,weight:2,dashArray:"6 6",interactive:false}).addTo(zoneLayer);
+    if(zoneDraft) pts.forEach(p=>L.circleMarker(p,{radius:5,color:accent,fillColor:"#fff",fillOpacity:1,weight:2,interactive:false}).addTo(zoneLayer));
+  }
+  if(zoneDraft) $("zoneHint").textContent = zoneDraft.length<3 ? `Tap the map to outline your zone (${zoneDraft.length}/3 points minimum).` : `${zoneDraft.length} points. Keep tapping or press Done.`;
+  $("zoneBtn").setAttribute("aria-pressed", String(!!(zoneDraft || state.zone)));
+}
+function zoneMode(on){
+  zoneDraft = on ? [] : null; $("zoneBar").hidden = !on;
+  if(startMarker) startMarker.dragging[on?"disable":"enable"]();
+  drawZone();
+}
+$("zoneBtn").onclick = ()=> zoneMode(!zoneDraft);
+$("zoneUndo").onclick = ()=>{ if(zoneDraft){ zoneDraft.pop(); drawZone(); } };
+$("zoneClear").onclick = ()=>{ state.zone=null; store.set("zone",null); zoneMode(false); clearRoute(); say("Zone removed. Routes can go anywhere."); };
+$("zoneDone").onclick = ()=>{
+  const d = zoneDraft;
+  if(d && d.length>=3){ state.zone=d; store.set("zone",d); clearRoute(); }
+  zoneMode(false);
+  if(d && d.length>=3){
+    map.fitBounds(L.latLngBounds(d),{paddingTopLeft:[24,80],paddingBottomRight:[24,sheetPad()+24]});
+    say(state.start && !inZone(state.start) ? "Zone saved. Your start is outside it, so tap inside the zone to move it." : "Zone saved. Routes will stay inside it.", state.start && !inZone(state.start));
+  } else if(d && d.length) say("A zone needs at least 3 points. Nothing was saved.", true);
+};
+function inZone(p, poly=state.zone){
+  if(!poly) return true;
+  let inside=false;
+  for(let i=0,j=poly.length-1;i<poly.length;j=i++){
+    const [yi,xi]=poly[i],[yj,xj]=poly[j];
+    if(((yi>p.lat)!==(yj>p.lat)) && (p.lng < (xj-xi)*(p.lat-yi)/(yj-yi)+xi)) inside=!inside;
+  }
+  return inside;
+}
+// Pull a waypoint back toward the start until it sits inside the zone.
+function clampToZone(p, anchor){
+  if(!state.zone || inZone(p)) return p;
+  let lo=0, hi=1;
+  for(let i=0;i<14;i++){ const t=(lo+hi)/2, q={lat:anchor.lat+(p.lat-anchor.lat)*t, lng:anchor.lng+(p.lng-anchor.lng)*t}; if(inZone(q)) lo=t; else hi=t; }
+  return {lat:anchor.lat+(p.lat-anchor.lat)*lo*0.97, lng:anchor.lng+(p.lng-anchor.lng)*lo*0.97};
+}
+function outsideFrac(coords, total){
+  if(!state.zone || total<1) return 0;
+  let out=0;
+  for(let i=1;i<coords.length;i++){ const a=coords[i-1],b=coords[i]; if(!inZone({lat:(a.lat+b.lat)/2,lng:(a.lng+b.lng)/2})) out+=hav(a,b); }
+  return out/total;
+}
 
 function locate(){
   if(!navigator.geolocation){ say("Location isn't available here. Search for a start point or tap the map.",true); return; }
@@ -183,10 +259,10 @@ function hav(a,b){
 }
 // Waypoints for a target "size" (radius for loops, reach for out-and-back).
 function waypoints(start, size, brg, mode){
-  if(mode==="out") return [start, offset(start,size,brg), start];
+  if(mode==="out") return [start, clampToZone(offset(start,size,brg),start), start];
   const c = offset(start, size, brg);           // circle centre; start sits on the circle
   const pts = [start];
-  for(let k=1;k<4;k++) pts.push(offset(c, size, brg+Math.PI + k*Math.PI/2));
+  for(let k=1;k<4;k++) pts.push(clampToZone(offset(c, size, brg+Math.PI + k*Math.PI/2), start));
   pts.push(start);
   return pts;
 }
@@ -201,7 +277,7 @@ async function route(pts){
   const raw = j.routes[0].geometry.coordinates.map(([x,y])=>({lat:y,lng:x}));
   const clean = state.mode==="loop" ? removeBacktracks(raw, j.routes[0].distance) : raw;
   let d = 0; for(let i=1;i<clean.length;i++) d += hav(clean[i-1],clean[i]);
-  return {distance:d, coords:clean, pts, overlap: overlapFrac(clean, d)};
+  return {distance:d, coords:clean, pts, overlap: overlapFrac(clean, d), outside: outsideFrac(clean, d)};
 }
 
 // Share of the route that runs over ground already covered earlier
@@ -255,6 +331,7 @@ function pointsAlong(coords, n){
 
 async function plan(){
   if(!state.start){ say("Set a start point first: allow location, search, or tap the map.",true); return; }
+  if(!inZone(state.start)){ say("Your start is outside your zone. Tap inside the zone to move it, or remove the zone.",true); return; }
   const target = state.dist * (state.unit==="km"?1000:MI);
   const go = $("go"); go.disabled = true; go.textContent = "Mapping…";
   // Roads wiggle: start smaller than the ideal circle, then rescale toward the target.
@@ -262,7 +339,7 @@ async function plan(){
   let best = null;
   const loop = state.mode==="loop";
   // Lower is better: distance error plus a heavy penalty for retracing or side loops.
-  const score = r => Math.abs(r.distance-target)/target + (loop ? 2*r.overlap : 0);
+  const score = r => Math.abs(r.distance-target)/target + (loop ? 2*r.overlap : 0) + 6*r.outside;
   const keep = r => { if(!best || score(r) < score(best)) best = r; };
   const tune = async (brg, tries) => {
     for(let i=0;i<tries;i++){
@@ -274,7 +351,7 @@ async function plan(){
   try{
     say("Finding the right size…");
     await tune(state.bearing, 3);
-    if(loop){
+    if(loop || state.zone){
       // Try the loop in other directions and keep the cleanest one.
       for(let k=1;k<6;k++){
         say(`Looking for the cleanest loop… (${k}/5)`);
@@ -327,6 +404,7 @@ function draw(r, target){
   $("sheet").classList.add("min");
   say(Math.abs(off*conv)/target < 0.08 ? "Here's your run. Not keen? Try a new direction." :
       "Closest route I could find around here. Try a new direction for another option.");
+  if(r.outside > 0.02) say(`About ${Math.round(r.outside*100)}% of this route leaves your zone. Try a shorter run or a bigger zone.`, true);
 }
 
 function gmapsLink(r){
@@ -378,7 +456,7 @@ $("searchForm").onsubmit = async e=>{
   }catch{ say("Search isn't reachable right now. Tap the map to set a start instead.",true); }
 };
 
-renderDist(); sheetPad(); locate();
+renderDist(); sheetPad(); drawZone(); locate();
 })();
 </script>
 </body>
