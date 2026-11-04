@@ -223,11 +223,11 @@ function inZone(p, poly=state.zone){
   return inside;
 }
 // Pull a waypoint back toward the start until it sits inside the zone.
-function clampToZone(p, anchor){
+function clampToZone(p, anchor, keep=0.97){
   if(!state.zone || inZone(p)) return p;
   let lo=0, hi=1;
   for(let i=0;i<14;i++){ const t=(lo+hi)/2, q={lat:anchor.lat+(p.lat-anchor.lat)*t, lng:anchor.lng+(p.lng-anchor.lng)*t}; if(inZone(q)) lo=t; else hi=t; }
-  return {lat:anchor.lat+(p.lat-anchor.lat)*lo*0.97, lng:anchor.lng+(p.lng-anchor.lng)*lo*0.97};
+  return {lat:anchor.lat+(p.lat-anchor.lat)*lo*keep, lng:anchor.lng+(p.lng-anchor.lng)*lo*keep};
 }
 function outsideFrac(coords, total){
   if(!state.zone || total<1) return 0;
@@ -326,18 +326,32 @@ function overlapFrac(coords, total){
 function removeBacktracks(coords, total){
   const NEAR = 20, maxCut = Math.min(1500, total*0.3), MIN = 25;
   const out = [], cum = [];
+  const at = d => { let lo=0, hi=cum.length-1; while(lo<hi){ const m=(lo+hi)>>1; if(cum[m]<d) lo=m+1; else hi=m; } return out[lo]; };
+  // A true dead end goes out and comes back the same way: points equally far
+  // from each end of the stretch sit on top of each other. A real loop does not.
+  const isSpur = (j, here, p) => {
+    const B = here - cum[j];
+    for(const f of [0.2, 0.35, 0.45]){
+      const a = at(cum[j] + B*f), bd = here - B*f;
+      const b = bd > cum[cum.length-1] ? p : at(bd);
+      if(hav(a,b) > NEAR*1.5) return false;
+    }
+    return true;
+  };
   for(const p of coords){
     let cut = -1;
     const here = out.length ? cum[cum.length-1] + hav(out[out.length-1], p) : 0;
     for(let j=out.length-2; j>=0; j--){
       const back = here - cum[j];
       if(back > maxCut) break;
-      if(back > MIN && hav(out[j], p) < NEAR){ cut = j; }
+      if(back > MIN && hav(out[j], p) < NEAR && isSpur(j, here, p)) cut = j;
     }
     if(cut >= 0){ out.length = cut+1; cum.length = cut+1; continue; }
     out.push(p); cum.push(here);
   }
-  return out;
+  // Never let the clean-up eat most of the route.
+  let kept = 0; for(let i=1;i<out.length;i++) kept += hav(out[i-1],out[i]);
+  return kept < total*0.65 ? coords : out;
 }
 
 // Points spread along the cleaned route, so Google Maps follows the same path.
@@ -353,7 +367,7 @@ async function plan(){
   if(!state.start){ say("Set a start point first: allow location, search, or tap the map.",true); return; }
   let moved = false;
   if(!nearZone(state.start)){
-    const s = clampToZone(state.start, zoneCentre());
+    const s = clampToZone(state.start, zoneCentre(), 0.8);
     setStart(s.lat, s.lng); moved = true;
   }
   const target = state.dist * (state.unit==="km"?1000:MI);
