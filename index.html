@@ -188,7 +188,8 @@ const state = {
   dist: store.get("dist",5), unit: store.get("unit","km"), mode: store.get("mode","loop"),
   pace: store.get("pace","6:00"), start: null, bearing: Math.random()*2*Math.PI, route: null,
   zone: store.get("zone", null),  // [[lat,lng],...] polygon the route must stay inside
-  longest: false                  // "Longest loop": biggest clean loop that fits the zone
+  longest: false,                 // "Longest loop": biggest clean loop that fits the zone
+  zoneRoads: store.get("zoneRoads", null)  // estate name: other named roads count as outside
 };
 
 // ---------- map ----------
@@ -237,10 +238,10 @@ function zoneMode(on){
 }
 $("zoneBtn").onclick = ()=> zoneMode(!zoneDraft);
 $("zoneUndo").onclick = ()=>{ if(zoneDraft){ zoneDraft.pop(); drawZone(); } };
-$("zoneClear").onclick = ()=>{ state.zone=null; store.set("zone",null); zoneMode(false); clearRoute(); renderDist(); say("Zone removed. Routes can go anywhere."); };
+$("zoneClear").onclick = ()=>{ state.zone=null; store.set("zone",null); state.zoneRoads=null; store.set("zoneRoads",null); zoneMode(false); clearRoute(); renderDist(); say("Zone removed. Routes can go anywhere."); };
 $("zoneDone").onclick = ()=>{
   const d = zoneDraft;
-  if(d && d.length>=3){ state.zone=d; store.set("zone",d); clearRoute(); renderDist(); }
+  if(d && d.length>=3){ state.zone=d; store.set("zone",d); state.zoneRoads=null; store.set("zoneRoads",null); clearRoute(); renderDist(); }
   zoneMode(false);
   if(d && d.length>=3){
     map.fitBounds(L.latLngBounds(d),{paddingTopLeft:[24,80],paddingBottomRight:[24,sheetPad()+24],maxZoom:17});
@@ -337,7 +338,7 @@ function waypoints(start, size, brg, mode){
 // ---------- routing ----------
 async function route(pts){
   const coords = pts.map(p=>p.lng.toFixed(6)+","+p.lat.toFixed(6)).join(";");
-  const url = ROUTER+coords+"?overview=full&geometries=geojson&continue_straight=false";
+  const url = ROUTER+coords+"?overview=full&geometries=geojson&continue_straight=false&steps=true";
   let r = await fetch(url);
   // The free route service asks busy users to slow down: wait a moment and try once more.
   if(r.status===429){ await new Promise(x=>setTimeout(x,1500)); r = await fetch(url); }
@@ -347,7 +348,17 @@ async function route(pts){
   const raw = j.routes[0].geometry.coordinates.map(([x,y])=>({lat:y,lng:x}));
   const clean = state.mode==="loop" ? removeBacktracks(raw, j.routes[0].distance) : raw;
   let d = 0; for(let i=1;i<clean.length;i++) d += hav(clean[i-1],clean[i]);
-  return {distance:d, coords:clean, pts, overlap: overlapFrac(clean, d), outside: outsideFrac(clean, d)};
+  // Estate zones: distance on roads with other names (main roads round the edge) counts as outside.
+  let foreign = 0;
+  if(state.zone && state.zoneRoads){
+    const want = state.zoneRoads.toLowerCase(); let tot = 0, bad = 0;
+    for(const leg of j.routes[0].legs||[]) for(const st of leg.steps||[]){
+      tot += st.distance; const nm = (st.name||"").toLowerCase();
+      if(nm && !nm.includes(want)) bad += st.distance;
+    }
+    foreign = tot ? bad/tot : 0;
+  }
+  return {distance:d, coords:clean, pts, overlap: overlapFrac(clean, d), outside: Math.max(outsideFrac(clean, d), foreign)};
 }
 
 // Share of the route that runs over ground already covered earlier
@@ -455,7 +466,7 @@ async function plan(){
   try{
     if(state.longest && state.zone && loop){
       // Longest loop: hug the zone's edges with more waypoints; reward length, punish doubling back.
-      const lscore = r => 10*r.overlap + 8*r.outside - r.distance/1000;
+      const lscore = r => 20*r.overlap + 10*r.outside - r.distance/1000;
       for(const k of [8, 6]) for(const sc of [0.9, 0.75, 0.6]) for(const dir of [1,-1]){
         say("Searching for the longest loop in your zone…");
         const r = await tryRoute(zoneLoop(state.start, sc, dir, k), state.bearing);
@@ -740,8 +751,9 @@ function grow(ring, m){
   const c = {lat:ring.reduce((a,p)=>a+p[0],0)/ring.length, lng:ring.reduce((a,p)=>a+p[1],0)/ring.length};
   return ring.map(([la,ln])=>{ const d = hav(c,{lat:la,lng:ln}) || 1, k = (d+m)/d; return [c.lat+(la-c.lat)*k, c.lng+(ln-c.lng)*k]; });
 }
+const isEstate = place => !!place && /^(landuse|place)$/.test(place.class);
 async function estateOutline(ring, place){
-  if(!place || !/^(landuse|place)$/.test(place.class)) return ring;   // parks keep their exact shape
+  if(!isEstate(place)) return ring;   // parks keep their exact shape
   const name = place.display_name.split(",")[0].replace(/["\\]/g,"");
   const lats = ring.map(p=>p[0]), lngs = ring.map(p=>p[1]), pad = 0.003;
   const box = [Math.min(...lngs)-pad, Math.max(...lats)+pad, Math.max(...lngs)+pad, Math.min(...lats)-pad].join(",");
@@ -758,8 +770,8 @@ async function estateOutline(ring, place){
     return grow(hull(ring.concat(pts)), 25);
   }catch{ return grow(ring, 25); }
 }
-function applyZone(ring, name){
-  state.zone = ring; store.set("zone", ring); clearRoute(); renderDist();
+function applyZone(ring, name, roads=null){
+  state.zone = ring; store.set("zone", ring); state.zoneRoads = roads; store.set("zoneRoads", roads); clearRoute(); renderDist();
   if(zoneDraft) zoneMode(false); else drawZone();
   $("zoneOffer").hidden = true;
   map.fitBounds(L.latLngBounds(ring),{paddingTopLeft:[24,80],paddingBottomRight:[24,sheetPad()+24],maxZoom:17});
@@ -773,13 +785,14 @@ $("zoneFind").onsubmit = async e=>{
     const hit = j.map(x=>({x, ring:outlineOf(x.geojson)})).find(h=>usable(h.ring));
     if(!hit){ $("zoneHint").textContent = `Couldn't find an outline for "${q}". Tap the map to draw your zone instead.`; return; }
     $("zoneQ").value=""; $("zoneQ").blur();
-    applyZone(await estateOutline(hit.ring, hit.x), hit.x.display_name.split(",")[0]);
+    const nm = hit.x.display_name.split(",")[0];
+    applyZone(await estateOutline(hit.ring, hit.x), nm, isEstate(hit.x) ? nm : null);
   }catch{ $("zoneHint").textContent = "Couldn't look that up right now. Tap the map to draw your zone instead."; }
 };
 $("zoneOffer").onclick = async ()=>{
   if(!offered) return; const o = offered;
   say(`Loading the outline of ${o.name}…`);
-  applyZone(await estateOutline(o.ring, o.place), o.name);
+  applyZone(await estateOutline(o.ring, o.place), o.name, isEstate(o.place) ? o.name : null);
 };
 
 $("searchForm").onsubmit = async e=>{
