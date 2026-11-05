@@ -703,7 +703,6 @@ const usable = ring => ring && kmArea(ring) > 0.01 && kmArea(ring) < 25;
 let offered = null;
 // Estates: the mapped outline often leaves out some of the estate's own roads, so also
 // fetch every road with the estate's name and wrap the zone around all of it.
-const OVERPASS = "https://overpass-api.de/api/interpreter";
 function hull(pts){
   const p = pts.map(([a,b])=>[b,a]).sort((u,v)=>u[0]-v[0]||u[1]-v[1]);
   const cross = (o,a,b)=>(a[0]-o[0])*(b[1]-o[1])-(a[1]-o[1])*(b[0]-o[0]);
@@ -721,11 +720,17 @@ async function estateOutline(ring, place){
   if(!place || !/^(landuse|place)$/.test(place.class)) return ring;   // parks keep their exact shape
   const name = place.display_name.split(",")[0].replace(/["\\]/g,"");
   const lats = ring.map(p=>p[0]), lngs = ring.map(p=>p[1]), pad = 0.003;
-  const bbox = [Math.min(...lats)-pad, Math.min(...lngs)-pad, Math.max(...lats)+pad, Math.max(...lngs)+pad].join(",");
+  const box = [Math.min(...lngs)-pad, Math.max(...lats)+pad, Math.max(...lngs)+pad, Math.min(...lats)-pad].join(",");
+  const ac = new AbortController(); const timer = setTimeout(()=>ac.abort(), 8000);
   try{
-    const q = `[out:json][timeout:10];way["highway"]["name"="${name}"](${bbox});out geom;`;
-    const j = await (await fetch(OVERPASS, {method:"POST", body:new URLSearchParams({data:q})})).json();
-    const pts = j.elements.flatMap(w=>(w.geometry||[]).map(g=>[g.lat,g.lon]));
+    // dedupe=0 returns every separate road with this name, not just one.
+    const url = `https://nominatim.openstreetmap.org/search?format=json&limit=40&dedupe=0&bounded=1&polygon_geojson=1&viewbox=${box}&q=${encodeURIComponent(name)}`;
+    const j = await (await fetch(url, {signal:ac.signal})).json();
+    const pts = j.filter(x=>x.class==="highway" && x.geojson).flatMap(x=>{
+      const g = x.geojson, lines = g.type==="LineString" ? [g.coordinates] : g.type==="MultiLineString" ? g.coordinates : [];
+      return lines.flat().map(([ln,la])=>[la,ln]);
+    });
+    clearTimeout(timer);
     return grow(hull(ring.concat(pts)), 25);
   }catch{ return grow(ring, 25); }
 }
