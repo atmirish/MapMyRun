@@ -323,8 +323,16 @@ function overlapFrac(coords, total){
 // Cut out dead-end spurs and small side loops: whenever the path comes back
 // within a few metres of a point it passed a short distance earlier, drop
 // everything in between. The main loop's return to the start is never cut.
-function removeBacktracks(coords, total){
+function removeBacktracks(sparse, total){
+  // The route service only sends corner points; fill in a point every 5 m so
+  // short dead ends can be recognised.
+  const coords = [sparse[0]];
+  for(let i=1;i<sparse.length;i++){
+    const a=sparse[i-1], b=sparse[i], k=Math.max(1, Math.ceil(hav(a,b)/5));
+    for(let s=1;s<=k;s++) coords.push({lat:a.lat+(b.lat-a.lat)*s/k, lng:a.lng+(b.lng-a.lng)*s/k});
+  }
   const NEAR = 20, maxCut = Math.min(1500, total*0.3), MIN = 25;
+  const smallLoop = Math.min(400, total*0.08);   // tiny block circuits get cut too
   const out = [], cum = [];
   const at = d => { let lo=0, hi=cum.length-1; while(lo<hi){ const m=(lo+hi)>>1; if(cum[m]<d) lo=m+1; else hi=m; } return out[lo]; };
   // A true dead end goes out and comes back the same way: points equally far
@@ -344,14 +352,14 @@ function removeBacktracks(coords, total){
     for(let j=out.length-2; j>=0; j--){
       const back = here - cum[j];
       if(back > maxCut) break;
-      if(back > MIN && hav(out[j], p) < NEAR && isSpur(j, here, p)) cut = j;
+      if(back > MIN && hav(out[j], p) < NEAR && (back < smallLoop || isSpur(j, here, p))) cut = j;
     }
     if(cut >= 0){ out.length = cut+1; cum.length = cut+1; continue; }
     out.push(p); cum.push(here);
   }
   // Never let the clean-up eat most of the route.
   let kept = 0; for(let i=1;i<out.length;i++) kept += hav(out[i-1],out[i]);
-  return kept < total*0.65 ? coords : out;
+  return kept < total*0.65 ? sparse : out;
 }
 
 // Points spread along the cleaned route, so Google Maps follows the same path.
