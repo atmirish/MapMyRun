@@ -459,7 +459,7 @@ function removeBacktracks(sparse, total){
   }
   // Never let the clean-up eat most of the route.
   let kept = 0; for(let i=1;i<out.length;i++) kept += hav(out[i-1],out[i]);
-  return kept < total*0.65 ? sparse : out;
+  return kept < total*0.4 ? sparse : out;
 }
 
 // Points spread along the cleaned route, so Google Maps follows the same path.
