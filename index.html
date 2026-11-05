@@ -75,6 +75,22 @@ body{background:var(--bg);color:var(--fg);font:15px/1.4 var(--body);overflow:hid
 .actions{display:flex;gap:8px}
 .actions a,.actions button{flex:1;text-align:center;text-decoration:none;border:1px solid var(--line);border-radius:12px;background:transparent;color:var(--fg);font:600 14px var(--body);padding:8px;cursor:pointer}
 .msg{font-size:14px;color:var(--muted);min-height:1.2em}
+/* live run */
+.runpanel{display:grid;gap:10px}
+.runpanel[hidden]{display:none}
+.runstats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.runstats .big{grid-column:1/-1;font:700 52px/1 var(--display);font-variant-numeric:tabular-nums;text-align:center}
+.runstats div{display:grid}
+.runstats b{font:700 24px var(--display);font-variant-numeric:tabular-nums}
+.runbtns{display:flex;gap:8px}
+.runbtns button{flex:1;border-radius:12px;padding:12px;font:700 16px var(--display);letter-spacing:.06em;text-transform:uppercase;cursor:pointer;border:1px solid var(--line);background:transparent;color:var(--fg)}
+.runbtns .stop{background:var(--warn);border-color:var(--warn);color:#fff}
+.sheet.running > :not(.runpanel){display:none!important}
+body.running .search,body.running #zoneBtn{visibility:hidden}
+.me{width:20px!important;height:20px!important;margin:-10px 0 0 -10px!important;border-radius:50%;background:#16a34a;border:3px solid #fff;box-shadow:0 1px 6px rgba(0,0,0,.35)}
+.me::after{content:"";position:absolute;inset:-9px;border-radius:50%;border:3px solid #16a34a;opacity:0;animation:pulse 1.8s ease-out infinite}
+@keyframes pulse{0%{transform:scale(.5);opacity:.9}100%{transform:scale(1.6);opacity:0}}
+@media (prefers-reduced-motion: reduce){.me::after{animation:none}}
 .msg.err{color:var(--warn)}
 button:focus-visible,a:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 
@@ -137,6 +153,17 @@ button:focus-visible,a:focus-visible,input:focus-visible{outline:2px solid var(-
       <button id="shuffle">New direction</button>
       <a id="gmaps" target="_blank" rel="noopener">Open in Google Maps</a>
     </div>
+    <button class="go" id="startRun" style="margin-top:8px;width:100%;background:#16a34a">Start run</button>
+  </div>
+  <div class="runpanel" id="runPanel" hidden>
+    <div class="runstats">
+      <div class="big" id="tTime">0:00</div>
+      <div><span class="label">Distance</span><b id="tDist">0.00</b></div>
+      <div><span class="label">Pace</span><b id="tPace">–</b></div>
+      <div><span class="label">To go</span><b id="tLeft">–</b></div>
+    </div>
+    <div class="msg" id="tMsg" role="status">Waiting for GPS…</div>
+    <div class="runbtns"><button id="tPause">Pause</button><button id="tStop" class="stop">Finish</button></div>
   </div>
 </section>
 
@@ -421,7 +448,7 @@ async function plan(){
   }finally{ go.disabled=false; go.textContent="Map my run"; }
 }
 
-function clearRoute(){ if(routeLayer){map.removeLayer(routeLayer);routeLayer=null;} kmLayer.clearLayers(); $("resultBox").hidden=true; state.route=null; }
+function clearRoute(){ if(routeLayer){map.removeLayer(routeLayer);routeLayer=null;} clearRunLayers(); kmLayer.clearLayers(); $("resultBox").hidden=true; state.route=null; }
 
 function draw(r, target){
   clearRoute(); state.route = r;
@@ -497,7 +524,113 @@ $("pace").onchange=e=>{ state.pace=e.target.value; store.set("pace",state.pace);
 $("go").onclick = plan;
 $("grab").onclick = ()=>{ $("sheet").classList.toggle("min"); };
 $("shuffle").onclick = ()=>{ state.bearing = (state.bearing + Math.PI*(0.5+Math.random())) % (2*Math.PI); plan(); };
-$("locate").onclick = locate;
+$("locate").onclick = ()=>{ if(run.on){ run.follow=true; if(run.last) map.panTo(run.last); return; } locate(); };
+
+// ---------- live run ----------
+const DONE = "#16a34a";
+const run = {on:false, paused:false, watch:null, t0:0, acc:0, dist:0, last:null, recent:[], lock:null, follow:true, idx:0, track:null, laps:0};
+let meMarker=null, traceLine=null, doneLine=null, todoLine=null, runTimer=null, finishArmed=0;
+const unitM = () => state.unit==="km" ? 1000 : MI;
+function clearRunLayers(){ if(run.on) return; [traceLine,doneLine,todoLine,meMarker].forEach(l=>l&&map.removeLayer(l)); traceLine=doneLine=todoLine=meMarker=null; }
+function fmtClock(s){ s=Math.floor(s); const h=Math.floor(s/3600), m=Math.floor(s%3600/60), x=String(s%60).padStart(2,"0"); return h ? `${h}:${String(m).padStart(2,"0")}:${x}` : `${m}:${x}`; }
+function tMsg(t, err){ const m=$("tMsg"); m.textContent=t; m.classList.toggle("err",!!err); }
+// The planned route, densified every 10 m, so progress can be measured along it.
+function buildTrack(){
+  const c = state.route && state.route.coords; if(!c || c.length<2) return null;
+  const pts=[c[0]], cum=[0];
+  for(let i=1;i<c.length;i++){ const a=c[i-1], b=c[i], d=hav(a,b), k=Math.max(1,Math.ceil(d/10));
+    for(let s=1;s<=k;s++){ const p={lat:a.lat+(b.lat-a.lat)*s/k, lng:a.lng+(b.lng-a.lng)*s/k}; cum.push(cum[cum.length-1]+hav(pts[pts.length-1],p)); pts.push(p); } }
+  return {pts, cum, total:cum[cum.length-1]};
+}
+// Route colours: done = green, still to run = blue.
+function paintProgress(){
+  const t = run.track; if(!t) return;
+  const done = t.pts.slice(0, run.idx+1), todo = t.pts.slice(run.idx);
+  doneLine.setLatLngs(done); todoLine.setLatLngs(todo);
+}
+async function keepAwake(){ try{ if(navigator.wakeLock) run.lock = await navigator.wakeLock.request("screen"); }catch{} }
+document.addEventListener("visibilitychange", ()=>{ if(run.on && document.visibilityState==="visible") keepAwake(); });
+map.on("dragstart", ()=>{ if(run.on) run.follow=false; });
+
+function startRun(){
+  if(!navigator.geolocation){ say("This browser can't track your location.", true); return; }
+  clearRunLayers();
+  Object.assign(run,{on:true, paused:false, t0:Date.now(), acc:0, dist:0, last:null, recent:[], follow:true, idx:0, laps:0, track:buildTrack()});
+  const accent = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim();
+  if(routeLayer){ map.removeLayer(routeLayer); routeLayer=null; }
+  todoLine = L.polyline([], {color:accent, weight:6, opacity:.9}).addTo(map);
+  doneLine = L.polyline([], {color:DONE, weight:7}).addTo(map);
+  traceLine = L.polyline([], {color:DONE, weight:3, dashArray:"2 6", opacity:.8}).addTo(map);
+  paintProgress();
+  document.body.classList.add("running"); $("sheet").classList.add("running"); $("sheet").classList.remove("min");
+  $("runPanel").hidden=false; $("tPause").textContent="Pause"; $("tStop").textContent="Finish";
+  $("tDist").textContent="0.00"; $("tPace").textContent="–"; $("tLeft").textContent = run.track ? (run.track.total/unitM()).toFixed(2) : "–";
+  tMsg("Waiting for GPS…");
+  run.watch = navigator.geolocation.watchPosition(onFix,
+    ()=>tMsg("Can't get your location. Allow location for this site in your browser settings.", true),
+    {enableHighAccuracy:true, maximumAge:0, timeout:20000});
+  runTimer = setInterval(()=>{ $("tTime").textContent = fmtClock(elapsed()/1000); }, 1000);
+  $("tTime").textContent="0:00";
+  keepAwake();
+}
+function elapsed(){ return run.acc + (run.paused ? 0 : Date.now()-run.t0); }
+function onFix(pos){
+  const c = pos.coords, p = {lat:c.latitude, lng:c.longitude}, now = pos.timestamp || Date.now();
+  if(!meMarker){ meMarker = L.marker(p,{icon:L.divIcon({className:"me"}), interactive:false, zIndexOffset:1000}).addTo(map); map.setView(p, Math.max(map.getZoom(),17)); }
+  else meMarker.setLatLng(p);
+  if(run.follow) map.panTo(p, {animate:true});
+  if(run.paused) return;
+  if(c.accuracy > 40){ tMsg(`Weak GPS signal (±${Math.round(c.accuracy)} m). Hold on…`); return; }
+  if(run.last){
+    const d = hav(run.last, p), dt = (now-run.last.t)/1000;
+    if(d < 3) return;                       // standing still / GPS jitter
+    if(dt > 0 && d/dt > 9) return;          // impossible jump
+    run.dist += d;
+  }
+  run.last = {...p, t:now};
+  traceLine.addLatLng(p);
+  run.recent.push({t:now, d:run.dist});
+  while(run.recent.length>2 && now-run.recent[0].t > 30000) run.recent.shift();
+  const u = unitM(), laps = Math.floor(run.dist/u);
+  if(laps > run.laps){ run.laps = laps; try{ navigator.vibrate && navigator.vibrate([200,100,200]); }catch{} }
+  $("tDist").textContent = (run.dist/u).toFixed(2);
+  const r0 = run.recent[0], dd = run.dist - r0.d, dts = (now - r0.t)/1000;
+  $("tPace").textContent = (dts >= 10 && dd > 15) ? fmtClock(dts/dd*u) : "–";
+  // Progress along the planned route
+  const t = run.track;
+  if(t){
+    let best = run.idx, bd = Infinity;
+    const lo = Math.max(0, run.idx-10), hi = Math.min(t.pts.length-1, run.idx+300);
+    for(let i=lo;i<=hi;i++){ const d=hav(p,t.pts[i]); if(d<bd){ bd=d; best=i; } }
+    if(bd < 50){
+      run.idx = Math.max(run.idx, best); paintProgress();
+      const left = Math.max(0, t.total - t.cum[run.idx]);
+      $("tLeft").textContent = (left/u).toFixed(2);
+      tMsg(left < 30 ? "You're back at the start. Tap Finish when you're done." : run.laps ? `${run.laps} ${state.unit} done. On route.` : "On route. Keep going!");
+    } else tMsg(`You're ${Math.round(bd)} m off the route. Head back to the blue line.`, true);
+  } else tMsg(run.laps ? `${run.laps} ${state.unit} done.` : "Tracking your run.");
+}
+function pauseRun(){
+  if(run.paused){ run.paused=false; run.t0=Date.now(); run.last=null; run.recent=[]; $("tPause").textContent="Pause"; tMsg("Running again."); }
+  else { run.acc += Date.now()-run.t0; run.paused=true; $("tPause").textContent="Resume"; tMsg("Paused. Your time has stopped."); }
+}
+function finishRun(){
+  if(Date.now()-finishArmed > 3000){
+    finishArmed = Date.now(); $("tStop").textContent = "Tap again to finish";
+    setTimeout(()=>{ if(run.on) $("tStop").textContent="Finish"; }, 3000); return;
+  }
+  if(run.watch!=null) navigator.geolocation.clearWatch(run.watch);
+  clearInterval(runTimer); try{ run.lock && run.lock.release(); }catch{}
+  const secs = elapsed()/1000, u = unitM();
+  run.on = false;
+  const runs = store.get("runs", []); runs.unshift({date:new Date().toISOString(), meters:Math.round(run.dist), secs:Math.round(secs)}); store.set("runs", runs.slice(0,30));
+  document.body.classList.remove("running"); $("sheet").classList.remove("running"); $("runPanel").hidden=true;
+  const avg = run.dist > 50 ? `, average pace ${fmtClock(secs/(run.dist/u))} /${state.unit}` : "";
+  say(`Run finished: ${(run.dist/u).toFixed(2)} ${state.unit} in ${fmtClock(secs)}${avg}. Nice work!`);
+}
+$("startRun").onclick = startRun;
+$("tPause").onclick = pauseRun;
+$("tStop").onclick = finishRun;
 $("searchForm").onsubmit = async e=>{
   e.preventDefault(); const q=$("q").value.trim(); if(!q) return;
   say("Searching…");
