@@ -186,7 +186,7 @@ const store = {get(k,d){try{const v=localStorage.getItem("loop-run:"+k);return v
 
 const state = {
   dist: store.get("dist",5), unit: store.get("unit","km"), mode: store.get("mode","loop"),
-  pace: store.get("pace","6:00"), start: null, bearing: Math.random()*2*Math.PI, route: null,
+  pace: store.get("pace","6:00"), start: null, bearing: Math.random()*2*Math.PI, route: null, userLoc: null,
   zone: store.get("zone", null),  // [[lat,lng],...] polygon the route must stay inside
   longest: !!store.get("zone", null),  // with a zone, default to the biggest clean loop that fits
   zoneRoads: store.get("zoneRoads", null)  // estate name: other named roads count as outside
@@ -306,7 +306,9 @@ function locate(){
   if(!navigator.geolocation){ say("Location isn't available here. Search for a start point or tap the map.",true); return; }
   say("Finding you…");
   navigator.geolocation.getCurrentPosition(
-    p => setStart(p.coords.latitude, p.coords.longitude, "Got you. Pick a distance and tap Map my run."),
+    p => { state.userLoc = {lat:p.coords.latitude, lng:p.coords.longitude};
+      if(state.zone && !userNearZone()) autoStart();
+      else setStart(p.coords.latitude, p.coords.longitude, "Got you. Pick a distance and tap Map my run."); },
     () => say("Couldn't get your location. Search for a start point or tap the map.", true),
     {enableHighAccuracy:true, timeout:12000, maximumAge:60000});
 }
@@ -823,12 +825,51 @@ async function estateOutline(ring, place){
     return grow(hull(ring.concat(pts)), 25);
   }catch{ return grow(ring, 25); }
 }
+// ---------- automatic start point for a zone ----------
+// Closest point on the zone's outline to p.
+function nearestEdgePoint(p, poly=state.zone){
+  const mx=111320*Math.cos(rad(p.lat)), my=110540; let best=null, bd=Infinity;
+  for(let i=0,j=poly.length-1;i<poly.length;j=i++){
+    const ax=(poly[j][1]-p.lng)*mx, ay=(poly[j][0]-p.lat)*my, bx=(poly[i][1]-p.lng)*mx, by=(poly[i][0]-p.lat)*my;
+    const dx=bx-ax, dy=by-ay, l2=dx*dx+dy*dy, t=l2 ? Math.max(0,Math.min(1,-(ax*dx+ay*dy)/l2)) : 0;
+    const x=ax+t*dx, y=ay+t*dy, d=Math.hypot(x,y);
+    if(d<bd){ bd=d; best={lat:p.lat+y/my, lng:p.lng+x/mx}; }
+  }
+  return best;
+}
+const userNearZone = () => !!state.userLoc && (inZone(state.userLoc) || edgeDist(state.userLoc) < 200);
+// Snap a point to the nearest walkable path that lies inside the zone.
+async function snapInside(p){
+  try{
+    const j = await (await fetch(ROUTER.replace("/route/","/nearest/")+`${p.lng.toFixed(6)},${p.lat.toFixed(6)}?number=5`)).json();
+    const hit = (j.waypoints||[]).map(w=>({lat:w.location[1], lng:w.location[0]})).find(q=>inZone(q));
+    return hit || p;
+  }catch{ return p; }
+}
+// You're near the zone: start where you are. You're elsewhere: start at the edge of the
+// zone nearest you (roughly the entrance you'd walk in by). Location unknown: start on
+// the path nearest the middle of the zone.
+async function autoStart(name){
+  if(!state.zone) return;
+  const where = name ? ` of ${name}` : "";
+  if(userNearZone()){ setStart(state.userLoc.lat, state.userLoc.lng, `Starting from where you are.`); return; }
+  const c = zoneCentre();
+  let target, msg;
+  if(state.userLoc){
+    const e = nearestEdgePoint(state.userLoc), d = hav(e, c) || 1, k = Math.min(1, 60/d);
+    target = {lat:e.lat+(c.lat-e.lat)*k, lng:e.lng+(c.lng-e.lng)*k};
+    msg = `You're not near${where ? " "+name : " your zone"}, so the run starts at the edge${where} nearest you.`;
+  } else { target = c; msg = `Start set inside${where ? " "+name : " your zone"}. Tap the map to move it.`; }
+  const s = await snapInside(target);
+  setStart(s.lat, s.lng, msg);
+}
 function applyZone(ring, name, roads=null){
   state.zone = ring; store.set("zone", ring); state.zoneRoads = roads; store.set("zoneRoads", roads); state.longest = true; state.mode = "loop"; clearRoute(); renderDist();
   if(zoneDraft) zoneMode(false); else drawZone();
   $("zoneOffer").hidden = true;
   map.fitBounds(L.latLngBounds(ring),{paddingTopLeft:[24,80],paddingBottomRight:[24,sheetPad()+24],maxZoom:17});
-  say(`Zone set to ${name}. Routes will stay inside it.` + (state.start && !nearZone(state.start) ? " Your start is outside it, so the run will begin at its edge." : ""));
+  say(`Zone set to ${name}. Routes will stay inside it.`);
+  autoStart(name).then(()=>map.fitBounds(L.latLngBounds(ring),{paddingTopLeft:[24,80],paddingBottomRight:[24,sheetPad()+24],maxZoom:17}));
 }
 $("zoneFind").onsubmit = async e=>{
   e.preventDefault(); const q=$("zoneQ").value.trim(); if(!q) return;
