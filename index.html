@@ -358,9 +358,21 @@ async function route(pts){
     }
     foreign = tot ? bad/tot : 0;
   }
-  return {distance:d, coords:clean, pts, overlap: overlapFrac(clean, d), outside: Math.max(outsideFrac(clean, d), foreign)};
+  // The stretch from your door out to the loop (and back at the end) is unavoidable,
+  // so it doesn't count as doubling back.
+  const dense = densify(clean, 5);
+  let a = 0, b = dense.length-1;
+  while(a < b && hav(dense[a], dense[b]) < 15){ a++; b--; }
+  const overlap = Math.max(0, overlapFrac(clean, d) - 2*a*5/Math.max(d,1));
+  return {distance:d, coords:clean, pts, overlap, outside: Math.max(outsideFrac(clean, d), foreign)};
 }
 
+function densify(c, step){
+  const out = [c[0]];
+  for(let i=1;i<c.length;i++){ const a=c[i-1], b=c[i], k=Math.max(1, Math.ceil(hav(a,b)/step));
+    for(let s=1;s<=k;s++) out.push({lat:a.lat+(b.lat-a.lat)*s/k, lng:a.lng+(b.lng-a.lng)*s/k}); }
+  return out;
+}
 // Share of the route that runs over ground already covered earlier
 // (out-and-back stretches, parallel side loops). 0 = perfectly clean loop.
 function overlapFrac(coords, total){
@@ -466,12 +478,19 @@ async function plan(){
   try{
     if(state.zone && loop){
       // Longest loop: hug the zone's edges with more waypoints; reward length, punish doubling back.
+      // Only clean loops (no doubling back, no main roads) compete on length; the
+      // fallback score is used only if nothing clean turns up.
+      const clean = r => r.overlap < 0.12 && r.outside <= 0.03;
       const lscore = r => 20*r.overlap + 10*r.outside - r.distance/1000;
+      let bestClean = null, bestAny = null;
       for(const k of [8, 6]) for(const sc of [0.9, 0.75, 0.6]) for(const dir of [1,-1]){
         say("Searching for the longest loop in your zone…");
         const r = await tryRoute(zoneLoop(state.start, sc, dir, k), state.bearing);
-        if(r && (!best || lscore(r) < lscore(best))) best = r;
+        if(!r) continue;
+        if(clean(r) && (!bestClean || r.distance > bestClean.distance)) bestClean = r;
+        if(!bestAny || lscore(r) < lscore(bestAny)) bestAny = r;
       }
+      best = bestClean || bestAny;
       if(!best) throw lastErr || new Error("no route");
       // Inside a zone, the longest loop is the route; a set distance just means laps of it.
       // Only when that loop is well over the distance asked for do we plan a shorter one.
@@ -479,8 +498,8 @@ async function plan(){
         const u = state.unit, conv = u==="km" ? 1000 : MI;
         best.laps = state.longest ? 1 : Math.max(1, Math.round(target/best.distance));
         state.route = best; draw(best, state.longest ? best.distance : target);
-        const clean = best.overlap < 0.12 && best.outside <= 0.02, len = `${(best.distance/conv).toFixed(2)} ${u}`;
-        say(!clean ? `Longest loop I could find: ${len}. Some of it doubles back or leaves the zone.` :
+        const len = `${(best.distance/conv).toFixed(2)} ${u}`;
+        say(!bestClean ? `Longest loop I could find: ${len}. Some of it doubles back or leaves the zone.` :
             best.laps > 1 ? `Longest loop in your zone is ${len}. Run it ${best.laps} times for ${(best.distance*best.laps/conv).toFixed(2)} ${u}. The app counts your laps.` :
             `Longest clean loop in your zone: ${len}.`);
         if(moved) say("You were outside your zone, so the run now starts at the nearest point inside it.");
