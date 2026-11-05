@@ -42,6 +42,10 @@ body{background:var(--bg);color:var(--fg);font:15px/1.4 var(--body);overflow:hid
   display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:14px}
 .zonebar[hidden],#resultBox[hidden]{display:none}
 .zonebar span{flex:1;min-width:140px}
+.zonefind{display:flex;gap:6px;flex-basis:100%;min-width:0}
+.zonefind input{flex:1;min-width:0;border:1px solid var(--line);border-radius:10px;background:transparent;color:var(--fg);font:inherit;padding:6px 10px}
+#zoneOffer{justify-self:start;border:1px solid var(--accent);background:var(--accent-soft);color:var(--accent);border-radius:999px;padding:7px 14px;font:600 14px var(--body);cursor:pointer}
+#zoneOffer[hidden]{display:none}
 .zonebar button{border:1px solid var(--line);background:transparent;color:var(--fg);border-radius:10px;padding:6px 10px;font:600 13px var(--body);cursor:pointer}
 .zonebar button.primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
 
@@ -116,6 +120,7 @@ button:focus-visible,a:focus-visible,input:focus-visible{outline:2px solid var(-
 </div>
 <div class="zonebar" id="zoneBar" hidden>
   <span id="zoneHint">Tap the map to outline your zone.</span>
+  <form class="zonefind" id="zoneFind"><input id="zoneQ" type="search" placeholder="Or type a park or estate, e.g. Marlay Park" aria-label="Park or estate name" autocomplete="off"><button class="primary">Use outline</button></form>
   <button id="zoneUndo">Undo</button>
   <button id="zoneClear">Remove zone</button>
   <button id="zoneDone" class="primary">Done</button>
@@ -143,6 +148,7 @@ button:focus-visible,a:focus-visible,input:focus-visible{outline:2px solid var(-
   </div>
   <button class="go" id="go">Map my run</button>
   <div class="msg" id="msg" role="status">Finding you…</div>
+  <button id="zoneOffer" class="ctrl" hidden></button>
   <div id="resultBox" hidden>
     <div class="result">
       <div><span class="label">Route</span><b id="rDist">–</b></div>
@@ -651,12 +657,50 @@ function finishRun(){
 $("startRun").onclick = startRun;
 $("tPause").onclick = pauseRun;
 $("tStop").onclick = finishRun;
+// ---------- outlines of parks and estates (from OpenStreetMap) ----------
+const OUTLINE = "&polygon_geojson=1&polygon_threshold=0.00003";
+function ringArea(r){ let a=0; for(let i=0,j=r.length-1;i<r.length;j=i++) a += (r[j][0]+r[i][0])*(r[j][1]-r[i][1]); return Math.abs(a)/2; }
+// Largest outer ring of a place's outline, as [[lat,lng],...]; null for points and roads.
+function outlineOf(g){
+  if(!g) return null;
+  const rings = g.type==="Polygon" ? [g.coordinates[0]] : g.type==="MultiPolygon" ? g.coordinates.map(p=>p[0]) : [];
+  if(!rings.length) return null;
+  rings.sort((a,b)=>ringArea(b)-ringArea(a));
+  return rings[0].map(([x,y])=>[y,x]);
+}
+// Rough size in km² so a whole city or county isn't offered as a zone.
+function kmArea(ring){ const lat=rad(ring[0][0]); return ringArea(ring)*111.32*111.32*Math.cos(lat); }
+const usable = ring => ring && kmArea(ring) > 0.01 && kmArea(ring) < 25;
+let offered = null;
+function applyZone(ring, name){
+  state.zone = ring; store.set("zone", ring); clearRoute();
+  if(zoneDraft) zoneMode(false); else drawZone();
+  $("zoneOffer").hidden = true;
+  map.fitBounds(L.latLngBounds(ring),{paddingTopLeft:[24,80],paddingBottomRight:[24,sheetPad()+24],maxZoom:17});
+  say(`Zone set to ${name}. Routes will stay inside it.` + (state.start && !nearZone(state.start) ? " Your start is outside it, so the run will begin at its edge." : ""));
+}
+$("zoneFind").onsubmit = async e=>{
+  e.preventDefault(); const q=$("zoneQ").value.trim(); if(!q) return;
+  $("zoneHint").textContent = "Looking up the outline…";
+  try{
+    const j = await (await fetch(GEOCODER.replace("limit=1","limit=5")+encodeURIComponent(q)+OUTLINE)).json();
+    const hit = j.map(x=>({x, ring:outlineOf(x.geojson)})).find(h=>usable(h.ring));
+    if(!hit){ $("zoneHint").textContent = `Couldn't find an outline for "${q}". Tap the map to draw your zone instead.`; return; }
+    $("zoneQ").value=""; $("zoneQ").blur();
+    applyZone(hit.ring, hit.x.display_name.split(",")[0]);
+  }catch{ $("zoneHint").textContent = "Couldn't look that up right now. Tap the map to draw your zone instead."; }
+};
+$("zoneOffer").onclick = ()=>{ if(offered) applyZone(offered.ring, offered.name); };
+
 $("searchForm").onsubmit = async e=>{
   e.preventDefault(); const q=$("q").value.trim(); if(!q) return;
-  say("Searching…");
-  try{ const r=await fetch(GEOCODER+encodeURIComponent(q)); const j=await r.json();
+  say("Searching…"); $("zoneOffer").hidden = true; offered = null;
+  try{ const r=await fetch(GEOCODER+encodeURIComponent(q)+OUTLINE); const j=await r.json();
     if(!j.length) return say(`Couldn't find "${q}". Try a street, park or town name.`,true);
     $("q").blur(); setStart(+j[0].lat, +j[0].lon, "Start set to "+j[0].display_name.split(",").slice(0,2).join(",")+".");
+    // Searched a park or estate? Offer to keep the run inside it.
+    const ring = outlineOf(j[0].geojson);
+    if(usable(ring)){ offered = {ring, name:j[0].display_name.split(",")[0]}; $("zoneOffer").textContent = `Stay inside ${offered.name}`; $("zoneOffer").hidden = false; }
   }catch{ say("Search isn't reachable right now. Tap the map to set a start instead.",true); }
 };
 
