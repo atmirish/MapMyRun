@@ -255,6 +255,19 @@ function inZone(p, poly=state.zone){
   }
   return inside;
 }
+// Waypoints around the inside of the zone: points on its outline, pulled in toward
+// the middle by `scale`, visited in order starting from the side nearest the start.
+function zoneLoop(start, scale, dir){
+  const c = zoneCentre(), k = 5;
+  const a0 = Math.atan2((start.lng-c.lng)*Math.cos(rad(c.lat)), start.lat-c.lat);
+  const pts = [start];
+  for(let i=1;i<k;i++){
+    const edge = clampToZone(offset(c, 5000, a0 + dir*i*2*Math.PI/k), c);
+    pts.push({lat:c.lat+(edge.lat-c.lat)*scale, lng:c.lng+(edge.lng-c.lng)*scale});
+  }
+  pts.push(start);
+  return pts;
+}
 // Pull a waypoint back toward the start until it sits inside the zone.
 function clampToZone(p, anchor, keep=0.97){
   if(!state.zone || inZone(p)) return p;
@@ -419,9 +432,10 @@ async function plan(){
   const loop = state.mode==="loop";
   // Lower is better: distance error plus a heavy penalty for retracing or side loops.
   // Inside a zone a short clean loop can be run as laps, so judge it on laps × length.
-  const lapsFor = r => (loop && state.zone && r.distance < target*0.9) ? Math.max(1, Math.round(target/r.distance)) : 1;
+  // Only a clean loop is worth repeating; never suggest laps of a dead end.
+  const lapsFor = r => (loop && state.zone && r.overlap < 0.12 && r.distance < target*0.9) ? Math.max(1, Math.round(target/r.distance)) : 1;
   const score = r => { const n = lapsFor(r);
-    return Math.abs(r.distance*n-target)/target + (loop ? (state.zone ? 5 : 2)*r.overlap : 0) + 6*r.outside + 0.05*(n-1); };
+    return Math.abs(r.distance*n-target)/target + (loop ? (state.zone ? 5 : 2)*r.overlap : 0) + 6*r.outside + 0.15*(n-1); };
   const keep = r => { if(!best || score(r) < score(best)) best = r; };
   const tune = async (brg, tries) => {
     for(let i=0;i<tries;i++){
@@ -441,7 +455,12 @@ async function plan(){
         const r = await route(waypoints(state.start,size,brg,state.mode)); r.brg = brg; keep(r);
       }
       if(state.zone && loop){
-        // Small zones (estates, parks): also try tighter loops that may avoid cul-de-sacs.
+        // Loops that follow the zone's own shape, around the inside of the estate or park.
+        for(const sc of [0.8, 0.6, 0.4]) for(const dir of [1,-1]){
+          say("Looking for a loop around your zone…");
+          const r = await route(zoneLoop(state.start, sc, dir)); r.brg = state.bearing; keep(r);
+        }
+        // Also try tighter circles that may avoid cul-de-sacs.
         const base = size;
         for(const f of [0.6, 0.4]) for(let k=0;k<6;k++){
           say("Looking for a clean loop inside your zone…");
