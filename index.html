@@ -188,7 +188,7 @@ const state = {
   dist: store.get("dist",5), unit: store.get("unit","km"), mode: store.get("mode","loop"),
   pace: store.get("pace","6:00"), start: null, bearing: Math.random()*2*Math.PI, route: null,
   zone: store.get("zone", null),  // [[lat,lng],...] polygon the route must stay inside
-  longest: false,                 // "Longest loop": biggest clean loop that fits the zone
+  longest: !!store.get("zone", null),  // with a zone, default to the biggest clean loop that fits
   zoneRoads: store.get("zoneRoads", null)  // estate name: other named roads count as outside
 };
 
@@ -241,7 +241,7 @@ $("zoneUndo").onclick = ()=>{ if(zoneDraft){ zoneDraft.pop(); drawZone(); } };
 $("zoneClear").onclick = ()=>{ state.zone=null; store.set("zone",null); state.zoneRoads=null; store.set("zoneRoads",null); zoneMode(false); clearRoute(); renderDist(); say("Zone removed. Routes can go anywhere."); };
 $("zoneDone").onclick = ()=>{
   const d = zoneDraft;
-  if(d && d.length>=3){ state.zone=d; store.set("zone",d); state.zoneRoads=null; store.set("zoneRoads",null); clearRoute(); renderDist(); }
+  if(d && d.length>=3){ state.zone=d; store.set("zone",d); state.zoneRoads=null; store.set("zoneRoads",null); state.longest=true; state.mode="loop"; clearRoute(); renderDist(); }
   zoneMode(false);
   if(d && d.length>=3){
     map.fitBounds(L.latLngBounds(d),{paddingTopLeft:[24,80],paddingBottomRight:[24,sheetPad()+24],maxZoom:17});
@@ -582,11 +582,7 @@ function renderDist(){
   $("distVal").textContent = state.longest ? "Max" : +state.dist.toFixed(1);
   $("unitLbl").textContent = state.longest ? "" : state.unit; $("paceUnit").textContent = "/"+state.unit;
   $("chips").innerHTML = "";
-  if(state.zone){
-    const b=document.createElement("button"); b.className="chip"; b.textContent="Longest loop";
-    b.setAttribute("aria-pressed", String(state.longest));
-    b.onclick=()=>{ state.longest=true; state.mode="loop"; changed(); }; $("chips").appendChild(b);
-  }
+  $("distVal").title = state.zone ? "Tap for the longest loop in your zone" : "";
   PRESETS[state.unit].forEach(v=>{
     const b=document.createElement("button"); b.className="chip"; b.textContent=v+" "+state.unit;
     b.setAttribute("aria-pressed", String(!state.longest && Math.abs(v-state.dist)<0.01));
@@ -607,6 +603,8 @@ $("uMi").onclick=()=>{ if(state.unit!=="mi"){state.unit="mi"; state.dist=Math.ro
 $("pace").value = state.pace;
 $("pace").onchange=e=>{ state.pace=e.target.value; store.set("pace",state.pace); if(state.route) draw(state.route, state.dist*(state.unit==="km"?1000:MI)); };
 $("go").onclick = plan;
+// With a zone, tapping the distance switches back to the longest loop.
+$("distVal").onclick = ()=>{ if(state.zone && !state.longest){ state.longest=true; state.mode="loop"; changed(); } };
 $("grab").onclick = ()=>{ $("sheet").classList.toggle("min"); };
 $("shuffle").onclick = ()=>{ state.bearing = (state.bearing + Math.PI*(0.5+Math.random())) % (2*Math.PI); plan(); };
 $("locate").onclick = ()=>{ if(run.on){ run.follow=true; if(run.last) map.panTo(run.last); return; } locate(); };
@@ -771,7 +769,7 @@ async function estateOutline(ring, place){
   }catch{ return grow(ring, 25); }
 }
 function applyZone(ring, name, roads=null){
-  state.zone = ring; store.set("zone", ring); state.zoneRoads = roads; store.set("zoneRoads", roads); clearRoute(); renderDist();
+  state.zone = ring; store.set("zone", ring); state.zoneRoads = roads; store.set("zoneRoads", roads); state.longest = true; state.mode = "loop"; clearRoute(); renderDist();
   if(zoneDraft) zoneMode(false); else drawZone();
   $("zoneOffer").hidden = true;
   map.fitBounds(L.latLngBounds(ring),{paddingTopLeft:[24,80],paddingBottomRight:[24,sheetPad()+24],maxZoom:17});
