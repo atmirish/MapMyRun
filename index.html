@@ -360,10 +360,13 @@ async function route(pts){
   }
   // The stretch from your door out to the loop (and back at the end) is unavoidable,
   // so it doesn't count as doubling back.
-  const dense = densify(clean, 5);
-  let a = 0, b = dense.length-1;
-  while(a < b && hav(dense[a], dense[b]) < 15){ a++; b--; }
-  const overlap = Math.max(0, overlapFrac(clean, d) - 2*a*5/Math.max(d,1));
+  const dense = densify(clean, 5), cum = [0];
+  for(let i=1;i<dense.length;i++) cum.push(cum[i-1] + hav(dense[i-1], dense[i]));
+  const tot = cum[cum.length-1];
+  const at = x => { let lo=0, hi=cum.length-1; while(lo<hi){ const m=(lo+hi)>>1; if(cum[m]<x) lo=m+1; else hi=m; } return dense[lo]; };
+  let stem = 0;
+  while(stem < tot/2 && hav(at(stem), at(tot-stem)) < 15) stem += 5;
+  const overlap = Math.max(0, overlapFrac(clean, d) - 2*stem/Math.max(d,1));
   return {distance:d, coords:clean, pts, overlap, outside: Math.max(outsideFrac(clean, d), foreign)};
 }
 
@@ -483,10 +486,12 @@ async function plan(){
       const clean = r => r.overlap < 0.12 && r.outside <= 0.03;
       const lscore = r => 20*r.overlap + 10*r.outside - r.distance/1000;
       let bestClean = null, bestAny = null;
+      window.mmrCandidates = [];   // for troubleshooting from the browser console
       for(const k of [8, 6]) for(const sc of [0.9, 0.75, 0.6]) for(const dir of [1,-1]){
         say("Searching for the longest loop in your zone…");
         const r = await tryRoute(zoneLoop(state.start, sc, dir, k), state.bearing);
         if(!r) continue;
+        window.mmrCandidates.push({km:+(r.distance/1000).toFixed(2), doubling:+r.overlap.toFixed(2), outside:+r.outside.toFixed(2), k, sc, dir});
         if(clean(r) && (!bestClean || r.distance > bestClean.distance)) bestClean = r;
         if(!bestAny || lscore(r) < lscore(bestAny)) bestAny = r;
       }
