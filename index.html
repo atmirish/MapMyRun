@@ -336,7 +336,10 @@ function waypoints(start, size, brg, mode){
 // ---------- routing ----------
 async function route(pts){
   const coords = pts.map(p=>p.lng.toFixed(6)+","+p.lat.toFixed(6)).join(";");
-  const r = await fetch(ROUTER+coords+"?overview=full&geometries=geojson&continue_straight=false");
+  const url = ROUTER+coords+"?overview=full&geometries=geojson&continue_straight=false";
+  let r = await fetch(url);
+  // The free route service asks busy users to slow down: wait a moment and try once more.
+  if(r.status===429){ await new Promise(x=>setTimeout(x,1500)); r = await fetch(url); }
   if(!r.ok) throw new Error("router "+r.status);
   const j = await r.json();
   if(j.code!=="Ok" || !j.routes?.length) throw new Error("no route");
@@ -436,10 +439,14 @@ async function plan(){
   const lapsFor = r => (loop && state.zone && r.overlap < 0.12 && r.distance < target*0.9) ? Math.max(1, Math.round(target/r.distance)) : 1;
   const score = r => { const n = lapsFor(r);
     return Math.abs(r.distance*n-target)/target + (loop ? (state.zone ? 5 : 2)*r.overlap : 0) + 6*r.outside + 0.15*(n-1); };
-  const keep = r => { if(!best || score(r) < score(best)) best = r; };
+  const keep = r => { if(r && (!best || score(r) < score(best))) best = r; };
+  // One failed request shouldn't sink the whole plan: skip it and keep the rest.
+  let lastErr = null;
+  const tryRoute = async (pts, brg) => { try{ const r = await route(pts); r.brg = brg; return r; }catch(e){ lastErr = e; return null; } };
   const tune = async (brg, tries) => {
     for(let i=0;i<tries;i++){
-      const r = await route(waypoints(state.start,size,brg,state.mode)); r.brg = brg; keep(r);
+      const r = await tryRoute(waypoints(state.start,size,brg,state.mode), brg); keep(r);
+      if(!r) continue;
       if(Math.abs(r.distance-target)/target < 0.04) return r;
       size *= Math.min(1.8, Math.max(0.5, target/r.distance));
     }
@@ -452,22 +459,23 @@ async function plan(){
       for(let k=1;k<6;k++){
         say(`Looking for the cleanest loop… (${k}/5)`);
         const brg = state.bearing + k*Math.PI/3;
-        const r = await route(waypoints(state.start,size,brg,state.mode)); r.brg = brg; keep(r);
+        keep(await tryRoute(waypoints(state.start,size,brg,state.mode), brg));
       }
       if(state.zone && loop){
         // Loops that follow the zone's own shape, around the inside of the estate or park.
         for(const sc of [0.8, 0.6, 0.4]) for(const dir of [1,-1]){
           say("Looking for a loop around your zone…");
-          const r = await route(zoneLoop(state.start, sc, dir)); r.brg = state.bearing; keep(r);
+          keep(await tryRoute(zoneLoop(state.start, sc, dir), state.bearing));
         }
-        // Also try tighter circles that may avoid cul-de-sacs.
+        // Also a few tighter circles that may avoid cul-de-sacs.
         const base = size;
-        for(const f of [0.6, 0.4]) for(let k=0;k<6;k++){
+        for(let k=0;k<3;k++){
           say("Looking for a clean loop inside your zone…");
-          const brg = state.bearing + k*Math.PI/3;
-          const r = await route(waypoints(state.start, base*f, brg, state.mode)); r.brg = brg; keep(r);
+          const brg = state.bearing + k*2*Math.PI/3;
+          keep(await tryRoute(waypoints(state.start, base*0.5, brg, state.mode), brg));
         }
       }
+      if(!best) throw lastErr || new Error("no route");
       if(lapsFor(best)===1 && Math.abs(best.distance-target)/target > 0.05){
         say("Fine-tuning the distance…");
         size *= Math.min(1.8, Math.max(0.5, target/best.distance));
@@ -475,12 +483,14 @@ async function plan(){
       }
       state.bearing = best.brg;
     }
+    if(!best) throw lastErr || new Error("no route");
     best.laps = lapsFor(best);
     state.route = best; draw(best, target);
     if(moved) say("You were outside your zone, so the run now starts at the nearest point inside it.");
   }catch(e){
     console.error(e);
-    say(e && e.message && e.message.startsWith("router") ? "Couldn't reach the route service. Check your connection and try again." :
+    say(e && e.message==="router 429" ? "The route service is busy. Wait a few seconds and tap Map my run again." :
+        e && e.message && e.message.startsWith("router") ? "Couldn't reach the route service. Check your connection and try again." :
         e && e.message==="no route" ? "No paths found here. Try moving your start onto a road or path." :
         "Something went wrong planning this run. Try a slightly different start or zone.", true);
   }finally{ go.disabled=false; go.textContent="Map my run"; }
