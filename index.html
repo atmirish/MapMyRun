@@ -507,7 +507,7 @@ async function plan(){
       // Longest loop: hug the zone's edges with more waypoints; reward length, punish doubling back.
       // Only clean loops (no doubling back, no main roads) compete on length; the
       // fallback score is used only if nothing clean turns up.
-      const clean = r => r.overlap < 0.05 && r.outside <= 0.03;   // strict: no cul-de-sac detours
+      const clean = r => r.overlap < 0.07 && r.outside <= 0.03;   // strict: no cul-de-sac detours
       const lscore = r => 20*r.overlap + 10*r.outside - r.distance/1000;
       let bestClean = null, bestAny = null;
       window.mmrCandidates = [];   // for troubleshooting from the browser console
