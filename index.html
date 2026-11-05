@@ -366,10 +366,34 @@ async function route(pts){
   const at = x => { let lo=0, hi=cum.length-1; while(lo<hi){ const m=(lo+hi)>>1; if(cum[m]<x) lo=m+1; else hi=m; } return dense[lo]; };
   let stem = 0;
   while(stem < tot/2 && hav(at(stem), at(tot-stem)) < 15) stem += 5;
-  const overlap = Math.max(0, overlapFrac(clean, d) - 2*stem/Math.max(d,1));
+  const overlap = retraceFrac(dense, cum, stem);
   return {distance:d, coords:clean, pts, overlap, outside: Math.max(outsideFrac(clean, d), foreign)};
 }
 
+// Share of the route that comes back within 12 m of ground it already covered
+// (cul-de-sacs, out-and-backs, side loops). The stretch from your door out to
+// the loop and back at the end (`stem` metres) is left out: it can't be avoided.
+function retraceFrac(dense, cum, stem){
+  const tot = cum[cum.length-1]; if(tot < 1) return 1;
+  const CELL = 12, grid = new Map(), mx = 111320*Math.cos(rad(dense[0].lat)), my = 110540;
+  const key = (x,y) => x+","+y;
+  let again = 0;
+  for(let i=0;i<dense.length;i++){
+    const p = dense[i], cx = Math.floor(p.lng*mx/CELL), cy = Math.floor(p.lat*my/CELL);
+    const counted = cum[i] > stem && cum[i] < tot - stem;
+    if(counted && i > 0){
+      let hit = false;
+      for(let dx=-1;dx<=1 && !hit;dx++) for(let dy=-1;dy<=1 && !hit;dy++){
+        for(const j of grid.get(key(cx+dx,cy+dy)) || []){
+          if(cum[i]-cum[j] > 60 && hav(p, dense[j]) < 12){ hit = true; break; }
+        }
+      }
+      if(hit) again += cum[i]-cum[i-1];
+    }
+    const k = key(cx,cy); if(!grid.has(k)) grid.set(k, []); grid.get(k).push(i);
+  }
+  return again / tot;
+}
 function densify(c, step){
   const out = [c[0]];
   for(let i=1;i<c.length;i++){ const a=c[i-1], b=c[i], k=Math.max(1, Math.ceil(hav(a,b)/step));
@@ -483,7 +507,7 @@ async function plan(){
       // Longest loop: hug the zone's edges with more waypoints; reward length, punish doubling back.
       // Only clean loops (no doubling back, no main roads) compete on length; the
       // fallback score is used only if nothing clean turns up.
-      const clean = r => r.overlap < 0.07 && r.outside <= 0.03;   // strict: no cul-de-sac detours
+      const clean = r => r.overlap < 0.05 && r.outside <= 0.03;   // strict: no cul-de-sac detours
       const lscore = r => 20*r.overlap + 10*r.outside - r.distance/1000;
       let bestClean = null, bestAny = null;
       window.mmrCandidates = [];   // for troubleshooting from the browser console
