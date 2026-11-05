@@ -412,7 +412,10 @@ async function plan(){
   let best = null;
   const loop = state.mode==="loop";
   // Lower is better: distance error plus a heavy penalty for retracing or side loops.
-  const score = r => Math.abs(r.distance-target)/target + (loop ? 2*r.overlap : 0) + 6*r.outside;
+  // Inside a zone a short clean loop can be run as laps, so judge it on laps × length.
+  const lapsFor = r => (loop && state.zone && r.distance < target*0.9) ? Math.max(1, Math.round(target/r.distance)) : 1;
+  const score = r => { const n = lapsFor(r);
+    return Math.abs(r.distance*n-target)/target + (loop ? (state.zone ? 5 : 2)*r.overlap : 0) + 6*r.outside + 0.05*(n-1); };
   const keep = r => { if(!best || score(r) < score(best)) best = r; };
   const tune = async (brg, tries) => {
     for(let i=0;i<tries;i++){
@@ -431,13 +434,23 @@ async function plan(){
         const brg = state.bearing + k*Math.PI/3;
         const r = await route(waypoints(state.start,size,brg,state.mode)); r.brg = brg; keep(r);
       }
-      if(Math.abs(best.distance-target)/target > 0.05){
+      if(state.zone && loop){
+        // Small zones (estates, parks): also try tighter loops that may avoid cul-de-sacs.
+        const base = size;
+        for(const f of [0.6, 0.4]) for(let k=0;k<6;k++){
+          say("Looking for a clean loop inside your zone…");
+          const brg = state.bearing + k*Math.PI/3;
+          const r = await route(waypoints(state.start, base*f, brg, state.mode)); r.brg = brg; keep(r);
+        }
+      }
+      if(lapsFor(best)===1 && Math.abs(best.distance-target)/target > 0.05){
         say("Fine-tuning the distance…");
         size *= Math.min(1.8, Math.max(0.5, target/best.distance));
         await tune(best.brg, 2);
       }
       state.bearing = best.brg;
     }
+    best.laps = lapsFor(best);
     state.route = best; draw(best, target);
     if(moved) say("You were outside your zone, so the run now starts at the nearest point inside it.");
   }catch(e){
@@ -471,17 +484,19 @@ function draw(r, target){
   }
   map.fitBounds(L.latLngBounds(r.coords),{paddingTopLeft:[24,80],paddingBottomRight:[24,sheetPad()+24],maxZoom:17});
   const u = state.unit, conv = u==="km"?1000:MI;
-  $("rDist").textContent = (r.distance/conv).toFixed(2)+" "+u;
-  const secs = paceSecs()*r.distance/conv;
+  const nl = r.laps || 1, full = r.distance*nl;
+  $("rDist").textContent = (r.distance/conv).toFixed(2)+" "+u + (nl>1 ? ` × ${nl}` : "");
+  const secs = paceSecs()*full/conv;
   $("rTime").textContent = secs ? fmtTime(secs) : "–";
-  const off = (r.distance-target)/conv;
+  const off = (full-target)/conv;
   $("rOff").textContent = (off>=0?"+":"−")+Math.abs(off).toFixed(2);
   $("gmaps").href = gmapsLink(r);
   $("resultBox").hidden = false;
   $("sheet").classList.add("min");
   say(Math.abs(off*conv)/target < 0.08 ? "Here's your run. Not keen? Try a new direction." :
       "Closest route I could find around here. Try a new direction for another option.");
-  if(state.zone && r.outside <= 0.02 && r.distance < target*0.85) say(`Your zone is too small for ${state.dist} ${state.unit}. This is the longest clean loop that fits inside it.`);
+  if(nl>1) say(`Run this loop ${nl} times for ${(full/conv).toFixed(2)} ${u}. The app counts your laps.`);
+  else if(state.zone && r.outside <= 0.02 && r.distance < target*0.85) say(`Your zone is too small for ${state.dist} ${state.unit}. This is the longest clean loop that fits inside it.`);
   if(r.outside > 0.02) say(`About ${Math.round(r.outside*100)}% of this route leaves your zone. Try a shorter run or a bigger zone.`, true);
 }
 
@@ -540,7 +555,7 @@ function buildTrack(){
   const pts=[c[0]], cum=[0];
   for(let i=1;i<c.length;i++){ const a=c[i-1], b=c[i], d=hav(a,b), k=Math.max(1,Math.ceil(d/10));
     for(let s=1;s<=k;s++){ const p={lat:a.lat+(b.lat-a.lat)*s/k, lng:a.lng+(b.lng-a.lng)*s/k}; cum.push(cum[cum.length-1]+hav(pts[pts.length-1],p)); pts.push(p); } }
-  return {pts, cum, total:cum[cum.length-1]};
+  return {pts, cum, total:cum[cum.length-1], laps: state.route.laps || 1};
 }
 // Route colours: done = green, still to run = blue.
 function paintProgress(){
@@ -555,7 +570,7 @@ map.on("dragstart", ()=>{ if(run.on) run.follow=false; });
 function startRun(){
   if(!navigator.geolocation){ say("This browser can't track your location.", true); return; }
   clearRunLayers();
-  Object.assign(run,{on:true, paused:false, t0:Date.now(), acc:0, dist:0, last:null, recent:[], follow:true, idx:0, laps:0, track:buildTrack()});
+  Object.assign(run,{on:true, paused:false, t0:Date.now(), acc:0, dist:0, last:null, recent:[], follow:true, idx:0, laps:0, lap:1, track:buildTrack()});
   const accent = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim();
   if(routeLayer){ map.removeLayer(routeLayer); routeLayer=null; }
   todoLine = L.polyline([], {color:accent, weight:6, opacity:.9}).addTo(map);
@@ -564,7 +579,7 @@ function startRun(){
   paintProgress();
   document.body.classList.add("running"); $("sheet").classList.add("running"); $("sheet").classList.remove("min");
   $("runPanel").hidden=false; $("tPause").textContent="Pause"; $("tStop").textContent="Finish";
-  $("tDist").textContent="0.00"; $("tPace").textContent="–"; $("tLeft").textContent = run.track ? (run.track.total/unitM()).toFixed(2) : "–";
+  $("tDist").textContent="0.00"; $("tPace").textContent="–"; $("tLeft").textContent = run.track ? (run.track.total*run.track.laps/unitM()).toFixed(2) : "–";
   tMsg("Waiting for GPS…");
   run.watch = navigator.geolocation.watchPosition(onFix,
     ()=>tMsg("Can't get your location. Allow location for this site in your browser settings.", true),
@@ -600,13 +615,18 @@ function onFix(pos){
   const t = run.track;
   if(t){
     let best = run.idx, bd = Infinity;
-    const lo = Math.max(0, run.idx-10), hi = Math.min(t.pts.length-1, run.idx+300);
+    const lo = Math.max(0, run.idx-10), hi = Math.min(t.pts.length-1, run.idx + Math.min(300, Math.floor(t.pts.length*0.4)));
     for(let i=lo;i<=hi;i++){ const d=hav(p,t.pts[i]); if(d<bd){ bd=d; best=i; } }
     if(bd < 50){
-      run.idx = Math.max(run.idx, best); paintProgress();
-      const left = Math.max(0, t.total - t.cum[run.idx]);
+      run.idx = Math.max(run.idx, best);
+      // Lap finished: start colouring the loop again from the beginning.
+      let lapNote = "";
+      if(t.laps > 1 && run.lap < t.laps && t.total - t.cum[run.idx] < 30){ run.lap++; run.idx = 0; lapNote = `Lap ${run.lap-1} done! Starting lap ${run.lap} of ${t.laps}. `; }
+      paintProgress();
+      const left = Math.max(0, t.total - t.cum[run.idx]) + (t.laps - run.lap)*t.total;
       $("tLeft").textContent = (left/u).toFixed(2);
-      tMsg(left < 30 ? "You're back at the start. Tap Finish when you're done." : run.laps ? `${run.laps} ${state.unit} done. On route.` : "On route. Keep going!");
+      const lapTxt = t.laps > 1 ? `Lap ${run.lap} of ${t.laps}. ` : "";
+      tMsg(lapNote || (left < 30 ? "You're back at the start. Tap Finish when you're done." : lapTxt + (run.laps ? `${run.laps} ${state.unit} done. On route.` : "On route. Keep going!")));
     } else tMsg(`You're ${Math.round(bd)} m off the route. Head back to the blue line.`, true);
   } else tMsg(run.laps ? `${run.laps} ${state.unit} done.` : "Tracking your run.");
 }
