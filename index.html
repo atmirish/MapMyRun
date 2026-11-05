@@ -362,7 +362,7 @@ function overlapFrac(coords, total){
       const t = s/k, x = (a.lng+(b.lng-a.lng)*t)*mx, y = (a.lat+(b.lat-a.lat)*t)*my;
       const key = Math.floor(x/CELL)+","+Math.floor(y/CELL);
       const last = seen.get(key);
-      if(last !== undefined && n-last > 8) over += d/k;
+      if(last !== undefined && n-last > 3) over += d/k;   // even a short cul-de-sac counts
       seen.set(key, n); n++;
     }
   }
