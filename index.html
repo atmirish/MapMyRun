@@ -701,6 +701,34 @@ function outlineOf(g){
 function kmArea(ring){ const lat=rad(ring[0][0]); return ringArea(ring)*111.32*111.32*Math.cos(lat); }
 const usable = ring => ring && kmArea(ring) > 0.01 && kmArea(ring) < 25;
 let offered = null;
+// Estates: the mapped outline often leaves out some of the estate's own roads, so also
+// fetch every road with the estate's name and wrap the zone around all of it.
+const OVERPASS = "https://overpass-api.de/api/interpreter";
+function hull(pts){
+  const p = pts.map(([a,b])=>[b,a]).sort((u,v)=>u[0]-v[0]||u[1]-v[1]);
+  const cross = (o,a,b)=>(a[0]-o[0])*(b[1]-o[1])-(a[1]-o[1])*(b[0]-o[0]);
+  const lo=[], up=[];
+  for(const q of p){ while(lo.length>=2 && cross(lo[lo.length-2],lo[lo.length-1],q)<=0) lo.pop(); lo.push(q); }
+  for(const q of p.slice().reverse()){ while(up.length>=2 && cross(up[up.length-2],up[up.length-1],q)<=0) up.pop(); up.push(q); }
+  return lo.slice(0,-1).concat(up.slice(0,-1)).map(([x,y])=>[y,x]);
+}
+// Push an outline out by `m` metres so roads on its edge sit inside it.
+function grow(ring, m){
+  const c = {lat:ring.reduce((a,p)=>a+p[0],0)/ring.length, lng:ring.reduce((a,p)=>a+p[1],0)/ring.length};
+  return ring.map(([la,ln])=>{ const d = hav(c,{lat:la,lng:ln}) || 1, k = (d+m)/d; return [c.lat+(la-c.lat)*k, c.lng+(ln-c.lng)*k]; });
+}
+async function estateOutline(ring, place){
+  if(!place || !/^(landuse|place)$/.test(place.class)) return ring;   // parks keep their exact shape
+  const name = place.display_name.split(",")[0].replace(/["\\]/g,"");
+  const lats = ring.map(p=>p[0]), lngs = ring.map(p=>p[1]), pad = 0.003;
+  const bbox = [Math.min(...lats)-pad, Math.min(...lngs)-pad, Math.max(...lats)+pad, Math.max(...lngs)+pad].join(",");
+  try{
+    const q = `[out:json][timeout:10];way["highway"]["name"="${name}"](${bbox});out geom;`;
+    const j = await (await fetch(OVERPASS, {method:"POST", body:new URLSearchParams({data:q})})).json();
+    const pts = j.elements.flatMap(w=>(w.geometry||[]).map(g=>[g.lat,g.lon]));
+    return grow(hull(ring.concat(pts)), 25);
+  }catch{ return grow(ring, 25); }
+}
 function applyZone(ring, name){
   state.zone = ring; store.set("zone", ring); clearRoute();
   if(zoneDraft) zoneMode(false); else drawZone();
@@ -716,10 +744,14 @@ $("zoneFind").onsubmit = async e=>{
     const hit = j.map(x=>({x, ring:outlineOf(x.geojson)})).find(h=>usable(h.ring));
     if(!hit){ $("zoneHint").textContent = `Couldn't find an outline for "${q}". Tap the map to draw your zone instead.`; return; }
     $("zoneQ").value=""; $("zoneQ").blur();
-    applyZone(hit.ring, hit.x.display_name.split(",")[0]);
+    applyZone(await estateOutline(hit.ring, hit.x), hit.x.display_name.split(",")[0]);
   }catch{ $("zoneHint").textContent = "Couldn't look that up right now. Tap the map to draw your zone instead."; }
 };
-$("zoneOffer").onclick = ()=>{ if(offered) applyZone(offered.ring, offered.name); };
+$("zoneOffer").onclick = async ()=>{
+  if(!offered) return; const o = offered;
+  say(`Loading the outline of ${o.name}…`);
+  applyZone(await estateOutline(o.ring, o.place), o.name);
+};
 
 $("searchForm").onsubmit = async e=>{
   e.preventDefault(); const q=$("q").value.trim(); if(!q) return;
@@ -729,7 +761,7 @@ $("searchForm").onsubmit = async e=>{
     $("q").blur(); setStart(+j[0].lat, +j[0].lon, "Start set to "+j[0].display_name.split(",").slice(0,2).join(",")+".");
     // Searched a park or estate? Offer to keep the run inside it.
     const ring = outlineOf(j[0].geojson);
-    if(usable(ring)){ offered = {ring, name:j[0].display_name.split(",")[0]}; $("zoneOffer").textContent = `Stay inside ${offered.name}`; $("zoneOffer").hidden = false; }
+    if(usable(ring)){ offered = {ring, name:j[0].display_name.split(",")[0], place:j[0]}; $("zoneOffer").textContent = `Stay inside ${offered.name}`; $("zoneOffer").hidden = false; }
   }catch{ say("Search isn't reachable right now. Tap the map to set a start instead.",true); }
 };
 
