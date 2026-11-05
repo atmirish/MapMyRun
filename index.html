@@ -464,7 +464,7 @@ async function plan(){
     }
   };
   try{
-    if(state.longest && state.zone && loop){
+    if(state.zone && loop){
       // Longest loop: hug the zone's edges with more waypoints; reward length, punish doubling back.
       const lscore = r => 20*r.overlap + 10*r.outside - r.distance/1000;
       for(const k of [8, 6]) for(const sc of [0.9, 0.75, 0.6]) for(const dir of [1,-1]){
@@ -473,13 +473,20 @@ async function plan(){
         if(r && (!best || lscore(r) < lscore(best))) best = r;
       }
       if(!best) throw lastErr || new Error("no route");
-      best.laps = 1; state.route = best; draw(best, best.distance);
-      const u = state.unit, conv = u==="km" ? 1000 : MI;
-      say(best.overlap < 0.12 && best.outside <= 0.02
-        ? `Longest clean loop in your zone: ${(best.distance/conv).toFixed(2)} ${u}.`
-        : `Longest loop I could find: ${(best.distance/conv).toFixed(2)} ${u}. Some of it doubles back or leaves the zone.`);
-      if(moved) say("You were outside your zone, so the run now starts at the nearest point inside it.");
-      return;
+      // Inside a zone, the longest loop is the route; a set distance just means laps of it.
+      // Only when that loop is well over the distance asked for do we plan a shorter one.
+      if(state.longest || best.distance <= target*1.15){
+        const u = state.unit, conv = u==="km" ? 1000 : MI;
+        best.laps = state.longest ? 1 : Math.max(1, Math.round(target/best.distance));
+        state.route = best; draw(best, state.longest ? best.distance : target);
+        const clean = best.overlap < 0.12 && best.outside <= 0.02, len = `${(best.distance/conv).toFixed(2)} ${u}`;
+        say(!clean ? `Longest loop I could find: ${len}. Some of it doubles back or leaves the zone.` :
+            best.laps > 1 ? `Longest loop in your zone is ${len}. Run it ${best.laps} times for ${(best.distance*best.laps/conv).toFixed(2)} ${u}. The app counts your laps.` :
+            `Longest clean loop in your zone: ${len}.`);
+        if(moved) say("You were outside your zone, so the run now starts at the nearest point inside it.");
+        return;
+      }
+      best = null;
     }
     say("Finding the right size…");
     await tune(state.bearing, 3);
